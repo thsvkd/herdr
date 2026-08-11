@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::text::{display_width_u16, truncate_end};
+use super::text::{display_width, display_width_u16, skip_prefix_width, truncate_end};
 use super::widgets::{
     action_button_row_rects, centered_popup_rect, panel_contrast_fg, render_action_button,
     render_modal_header, render_modal_shell, render_panel_shell, ActionButtonSpec,
@@ -55,8 +55,16 @@ fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect) 
         width: input_rect.width.saturating_sub(1),
         ..input_rect
     };
+
+    // A leading space offsets the text by one column, and the caret needs a
+    // column of its own past the last visible char.
+    let visible_width = usize::from(input_rect.width.saturating_sub(2));
+    let caret_col = display_width(&app.name_input[..app.name_input_caret()]);
+    let (scrolled, visible) =
+        skip_prefix_width(&app.name_input, caret_col.saturating_sub(visible_width));
+
     frame.render_widget(
-        Paragraph::new(format!(" {}", app.name_input)).style(
+        Paragraph::new(format!(" {visible}")).style(
             Style::default()
                 .fg(app.palette.text)
                 .bg(app.palette.surface0),
@@ -70,7 +78,7 @@ fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect) 
     let caret_x = input_rect
         .x
         .saturating_add(1)
-        .saturating_add(display_width_u16(&app.name_input))
+        .saturating_add(u16::try_from(caret_col.saturating_sub(scrolled)).unwrap_or(u16::MAX))
         .min(input_rect.right().saturating_sub(1));
     frame.set_cursor_position((caret_x, input_rect.y));
 }
@@ -1117,6 +1125,128 @@ mod tests {
         assert_eq!(caret, Position::new(last_column, input.y));
         assert_eq!(buffer[(caret.x, caret.y)].symbol(), " ");
         assert_eq!(buffer[(caret.x - 1, caret.y)].symbol(), "a");
+    }
+
+    fn rename_overlay_with_caret(name: &str, caret: usize) -> (Position, Buffer) {
+        let mut app = AppState::test_new();
+        app.mode = Mode::RenameWorkspace;
+        app.set_name_input(name.into(), false);
+        app.set_name_input_caret(caret);
+
+        let mut terminal = Terminal::new(TestBackend::new(RENAME_AREA.width, RENAME_AREA.height))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| render_rename_overlay(&app, frame, RENAME_AREA))
+            .expect("rename overlay should render");
+        let caret = terminal.get_cursor_position().expect("cursor position");
+        (caret, terminal.backend().buffer().clone())
+    }
+
+    fn field_row(buffer: &Buffer, rect: Rect) -> String {
+        (rect.x..rect.right())
+            .map(|x| buffer[(x, rect.y)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn rename_overlay_caret_follows_the_input_caret() {
+        let input = rename_input_rect(RENAME_AREA);
+
+        // The leading space puts column 0 of the text at `input.x + 1`.
+        assert_eq!(
+            rename_overlay_with_caret("website", 0).0,
+            Position::new(input.x + 1, input.y)
+        );
+        assert_eq!(
+            rename_overlay_with_caret("website", 3).0,
+            Position::new(input.x + 4, input.y)
+        );
+
+        // A caret before a wide character still sits on its first column.
+        assert_eq!(
+            rename_overlay_with_caret("あい", 3).0,
+            Position::new(input.x + 3, input.y)
+        );
+    }
+
+    #[test]
+    fn rename_overlay_scrolls_an_overflowing_name_to_keep_the_caret_visible() {
+        let input = rename_input_rect(RENAME_AREA);
+        let last_column = input.right() - 1;
+        // 54-column field: one column for the leading space and one for the
+        // caret leave 52 columns of text.
+        let name: String = std::iter::repeat_n('a', 60).chain(['Z']).collect();
+
+        // Caret at the end: the tail is shown and the caret pins to the field's
+        // last cell, which stays blank so the host cursor has a cell to invert.
+        let (caret, buffer) = rename_overlay_with_caret(&name, name.len());
+        assert_eq!(caret, Position::new(last_column, input.y));
+        assert_eq!(buffer[(caret.x, caret.y)].symbol(), " ");
+        assert_eq!(buffer[(caret.x - 1, caret.y)].symbol(), "Z");
+
+        // Caret at the start: the view scrolls back so column 0 is visible.
+        let (caret, buffer) = rename_overlay_with_caret(&name, 0);
+        assert_eq!(caret, Position::new(input.x + 1, input.y));
+        assert_eq!(buffer[(caret.x, caret.y)].symbol(), "a");
+        assert!(!field_row(&buffer, input).contains('Z'));
+    }
+
+    #[test]
+    fn rename_overlay_scrolls_wide_characters_without_splitting_them() {
+        let input = rename_input_rect(RENAME_AREA);
+        // 30 wide characters are 60 columns, so the view has to scroll by 8.
+        // That lands on a character boundary, and the caret still pins to the
+        // last cell.
+        let name: String = std::iter::repeat_n('あ', 30).collect();
+
+        let (caret, buffer) = rename_overlay_with_caret(&name, name.len());
+        assert_eq!(caret, Position::new(input.right() - 1, input.y));
+        assert_eq!(buffer[(caret.x, caret.y)].symbol(), " ");
+        let row = field_row(&buffer, input);
+        assert!(
+            row.chars().all(|ch| ch == 'あ' || ch == ' '),
+            "unexpected field content: {row:?}"
+        );
+
+        // A narrow character after the wide run makes the scroll boundary land
+        // inside a wide character: 61 columns of text need 9 scrolled away, but
+        // every boundary in the run is even. Scrolling 10 instead keeps the
+        // glyph whole and costs the caret one column.
+        let mixed = format!("{}a", "あ".repeat(30));
+        let (caret, buffer) = rename_overlay_with_caret(&mixed, mixed.len());
+        assert_eq!(caret, Position::new(input.right() - 2, input.y));
+        assert_eq!(buffer[(caret.x, caret.y)].symbol(), " ");
+        assert_eq!(buffer[(caret.x - 1, caret.y)].symbol(), "a");
+    }
+
+    #[test]
+    fn rename_overlay_scrolls_emoji_clusters_by_the_columns_they_occupy() {
+        let input = rename_input_rect(RENAME_AREA);
+
+        // A skin-tone thumbs-up is four chars but one two-column cell. Counting
+        // its chars would over-scroll and push the character next to the caret
+        // off the right edge, so typing at the end of the name would show
+        // nothing.
+        let name = format!("{}Z", "\u{1F44D}\u{1F3FD}".repeat(29));
+        let (caret, buffer) = rename_overlay_with_caret(&name, name.len());
+        assert!(caret.x < input.right(), "caret escaped the field");
+        assert_eq!(buffer[(caret.x, caret.y)].symbol(), " ");
+        // The character the caret sits behind has to be on screen.
+        assert_eq!(buffer[(caret.x - 1, caret.y)].symbol(), "Z");
+
+        // A variation-selector sequence must not be split: the field can never
+        // start on a bare selector.
+        let hearts = "\u{2764}\u{FE0F}".repeat(30);
+        let (_, buffer) = rename_overlay_with_caret(&hearts, hearts.len());
+        let row = field_row(&buffer, input);
+        assert!(
+            !row.contains('\u{FE0F}') || row.contains('\u{2764}'),
+            "field row lost its base characters: {row:?}"
+        );
+        assert!(
+            !row.trim_start().starts_with('\u{FE0F}'),
+            "field row starts on an orphan variation selector: {row:?}"
+        );
     }
 
     #[test]

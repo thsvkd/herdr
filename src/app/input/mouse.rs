@@ -275,8 +275,7 @@ impl AppState {
                                     .is_some_and(|create| create.creating) =>
                             {
                                 self.worktree_create = None;
-                                self.name_input.clear();
-                                self.name_input_replace_on_type = false;
+                                self.clear_name_input();
                                 leave_modal(self);
                             }
                             _ => {}

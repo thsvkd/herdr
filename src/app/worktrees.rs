@@ -107,8 +107,7 @@ impl App {
             "opening worktree dialog"
         );
         self.state.selected = ws_idx;
-        self.state.name_input = branch.clone();
-        self.state.name_input_replace_on_type = true;
+        self.state.set_name_input(branch.clone(), true);
         self.state.worktree_create = Some(WorktreeCreateState {
             source_workspace_id,
             source_checkout_path,
@@ -248,12 +247,7 @@ impl App {
             }
             KeyCode::Enter => self.submit_worktree_create_via_api(),
             KeyCode::Backspace => {
-                if self.state.name_input_replace_on_type {
-                    self.state.name_input.clear();
-                    self.state.name_input_replace_on_type = false;
-                } else {
-                    self.state.name_input.pop();
-                }
+                crate::app::input::delete_rename_input_char(&mut self.state);
                 self.sync_worktree_branch_from_input();
             }
             KeyCode::Char(c) => {
@@ -264,11 +258,7 @@ impl App {
     }
 
     pub(crate) fn insert_worktree_create_text(&mut self, text: &str) {
-        if self.state.name_input_replace_on_type {
-            self.state.name_input.clear();
-            self.state.name_input_replace_on_type = false;
-        }
-        self.state.name_input.push_str(text);
+        crate::app::input::insert_rename_input_text(&mut self.state, text);
         self.sync_worktree_branch_from_input();
     }
 
@@ -478,8 +468,7 @@ impl App {
 
     fn close_worktree_create_dialog(&mut self) {
         self.state.worktree_create = None;
-        self.state.name_input.clear();
-        self.state.name_input_replace_on_type = false;
+        self.state.clear_name_input();
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
         } else {
@@ -516,7 +505,10 @@ impl App {
         }
 
         create.branch = branch.clone();
+        // `create` borrows state.worktree_create, so `set_name_input` (which
+        // takes all of state) cannot run here; re-anchor the caret by hand.
         self.state.name_input = branch.clone();
+        self.state.name_input_cursor = None;
         create.checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
             &create.repo_name,
@@ -578,7 +570,10 @@ impl App {
         }
 
         create.branch = branch.clone();
+        // `create` borrows state.worktree_create, so `set_name_input` (which
+        // takes all of state) cannot run here; re-anchor the caret by hand.
         self.state.name_input = branch.clone();
+        self.state.name_input_cursor = None;
         create.checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
             &create.repo_name,
@@ -800,8 +795,7 @@ impl App {
                 let repo_name = create.repo_name.clone();
                 let source_repo_root = create.source_repo_root.clone();
                 self.state.worktree_create = None;
-                self.state.name_input.clear();
-                self.state.name_input_replace_on_type = false;
+                self.state.clear_name_input();
                 let source_membership = source_existing_membership.unwrap_or(
                     crate::workspace::WorktreeSpaceMembership {
                         key: repo_key.clone(),

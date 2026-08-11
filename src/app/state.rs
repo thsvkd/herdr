@@ -1369,6 +1369,14 @@ pub struct AppState {
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
+    /// Byte offset of the caret inside [`AppState::name_input`].
+    ///
+    /// `None` anchors the caret to the end of the text. Every dialog opens
+    /// there and every edit that lands on the last character returns there, so
+    /// the anchor stays `None` unless the caret is genuinely inside the text.
+    /// Storing the anchor instead of a resolved offset keeps the caret correct
+    /// when a call site replaces `name_input` wholesale.
+    pub name_input_cursor: Option<usize>,
     pub release_notes: Option<ReleaseNotesState>,
     pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
@@ -1514,6 +1522,38 @@ pub struct AppState {
 impl AppState {
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    /// Replaces the shared name input and re-anchors the caret to its end.
+    pub(crate) fn set_name_input(&mut self, text: String, replace_on_type: bool) {
+        self.name_input = text;
+        self.name_input_replace_on_type = replace_on_type;
+        self.name_input_cursor = None;
+    }
+
+    /// Empties the shared name input and re-anchors the caret.
+    pub(crate) fn clear_name_input(&mut self) {
+        self.set_name_input(String::new(), false);
+    }
+
+    /// Resolves [`AppState::name_input_cursor`] to a byte offset that is always
+    /// a char boundary of [`AppState::name_input`], so callers can slice the
+    /// buffer without checking bounds.
+    pub(crate) fn name_input_caret(&self) -> usize {
+        let Some(cursor) = self.name_input_cursor else {
+            return self.name_input.len();
+        };
+        let mut caret = cursor.min(self.name_input.len());
+        while caret > 0 && !self.name_input.is_char_boundary(caret) {
+            caret -= 1;
+        }
+        caret
+    }
+
+    /// Moves the caret to `caret`, collapsing an end-of-text offset back to the
+    /// `None` anchor so a later buffer replacement cannot strand it.
+    pub(crate) fn set_name_input_caret(&mut self, caret: usize) {
+        self.name_input_cursor = (caret < self.name_input.len()).then_some(caret);
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
@@ -1731,6 +1771,7 @@ impl AppState {
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
+            name_input_cursor: None,
             release_notes: None,
             product_announcement: None,
             keybind_help: KeybindHelpState::default(),

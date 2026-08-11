@@ -434,8 +434,7 @@ impl App {
             .is_some_and(|create| create.checkout_path == result.path)
         {
             self.state.worktree_create = None;
-            self.state.name_input.clear();
-            self.state.name_input_replace_on_type = false;
+            self.state.clear_name_input();
             self.state.mode = crate::app::Mode::Terminal;
         }
         self.state.mark_session_dirty();
